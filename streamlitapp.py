@@ -630,51 +630,148 @@ class MainDashboardPage:
         with tabs[0]:
             #muestra las compras que estan activas con opcones para seleccionar que tarjetas se han utilizado
             st.subheader("Compras activas")
-            opcion = st.selectbox("Seleccione una opción",opciones_tarjetas)
 
-            # Determinar qué tarjeta_id filtrar (o None si es "Todas")
-            tarjeta_id_filtro = nombre_a_id.get(opcion) if opcion != "Todas" else None
-
-            # Consultar compras activas
-            query = supabase.table("compras") \
-                .select("*") \
-                .eq("usuario_id", usuario_id) \
-                .eq("activa", True)
-            
-            if tarjeta_id_filtro:
-                query = query.eq("tarjeta_id", tarjeta_id_filtro)
-
-            compras = query.order("fecha_compra", desc=True).execute().data
-
-            if not compras:
-                st.info(f"No hay compras activas{' para ' + opcion if opcion != 'Todas' else ''}.")
+            if not tarjetas:
+                st.info("No tienes tarjetas registradas. Agrega una en Configuración.")
             else:
-                # Construir filas para el DataFrame
-                filas = []
-                for c in compras:
-                    nombre_tarjeta = tarjetas_dict.get(c["tarjeta_id"], "Desconocida")
-                    filas.append({
-                        "Tarjeta": nombre_tarjeta,
-                        "Descripción": c["descripcion"],
-                        "Fecha": c["fecha_compra"],
-                        "Monto total": c["monto_total"],
-                        "MSI": c["meses_sin_intereses"],
-                        "Pago mensual": round(c["monto_total"] / c["meses_sin_intereses"], 2),
-                    })
-                
-                df = pd.DataFrame(filas)
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Monto total": st.column_config.NumberColumn(format="$%.2f"),
-                        "Pago mensual": st.column_config.NumberColumn(format="$%.2f"),
-                    }
-                )
-                st.metric("Total en compras activas", f"${df['Monto total'].sum():,.2f}")
+                opcion = st.selectbox("Filtrar por tarjeta", opciones_tarjetas)
+                tarjeta_id_filtro = nombre_a_id.get(opcion) if opcion != "Todas" else None
 
-            # with st.form("form_compras"):
+                # 1. Consultar las compras activas
+                query = supabase.table("compras") \
+                    .select("*") \
+                    .eq("usuario_id", usuario_id) \
+                    .eq("activa", True)
+
+                if tarjeta_id_filtro:
+                    query = query.eq("tarjeta_id", tarjeta_id_filtro)
+
+                compras = query.order("fecha_compra", desc=True).execute().data
+
+                if not compras:
+                    st.info(f"No hay compras activas{' para ' + opcion if opcion != 'Todas' else ''}.")
+                else:
+                    # 2. Consultar TODOS los pagos programados de esas compras
+                    ids_compras = [c["id"] for c in compras]
+                    pagos = supabase.table("pagos_programados") \
+                        .select("compra_id, monto, pagado") \
+                        .in_("compra_id", ids_compras) \
+                        .execute().data
+
+                    # 3. Agrupar pagos por compra
+                    pagos_por_compra = {}
+                    for p in pagos:
+                        pagos_por_compra.setdefault(p["compra_id"], []).append(p)
+
+                    # 4. Construir filas
+                    filas = []
+                    for c in compras:
+                        pagos_compra = pagos_por_compra.get(c["id"], [])
+
+                        total_pagado = sum(p["monto"] for p in pagos_compra if p["pagado"])
+                        total_restante = sum(p["monto"] for p in pagos_compra if not p["pagado"])
+
+                        pagos_hechos = sum(1 for p in pagos_compra if p["pagado"])
+                        pagos_faltantes = sum(1 for p in pagos_compra if not p["pagado"])
+
+                        fila = {
+                            "Descripción": c["descripcion"],
+                            "Fecha": c["fecha_compra"],
+                            "Monto total": c["monto_total"],
+                            "MSI": c["meses_sin_intereses"],
+                        }
+
+                        # Cuando es "Todas": mostrar nombre de tarjeta
+                        # Cuando es una tarjeta específica: mostrar pagado/restante
+                        if opcion == "Todas":
+                            fila["Tarjeta"] = tarjetas_dict.get(c["tarjeta_id"], "Desconocida")
+                            fila["Pagado"] = total_pagado
+                            fila["Restante"] = total_restante
+                        else:
+                            fila["Pagado"] = total_pagado
+                            fila["Restante"] = total_restante
+                            fila["Meses"] = f"{pagos_hechos}/{c['meses_sin_intereses']}"
+
+                        filas.append(fila)
+                    df = pd.DataFrame(filas)
+                    # 5. Configurar columnas del DataFrame según el filtro
+                    if opcion == "Todas":
+                        column_config = {
+                            "Monto total": st.column_config.NumberColumn(format="$%.2f"),
+                            "Pagado": st.column_config.NumberColumn(format="$%.2f"),
+                            "Restante": st.column_config.NumberColumn(format="$%.2f"),
+                        }
+                        orden_columnas = ["Tarjeta", "Descripción", "Fecha", "Monto total", "MSI", "Pagado", "Restante"]
+                    else:
+                        column_config = {
+                            "Monto total": st.column_config.NumberColumn(format="$%.2f"),
+                            "Pagado": st.column_config.NumberColumn(format="$%.2f"),
+                            "Restante": st.column_config.NumberColumn(format="$%.2f"),
+                        }
+                        orden_columnas = ["Descripción", "Fecha", "Monto total", "MSI", "Pagado", "Restante", "Meses"]
+                    # Reordenar columnas
+                    df = df[orden_columnas]
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config=column_config,
+                    )
+
+                    # 6. Métricas resumen
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("💳 Total en compras", f"${df['Monto total'].sum():,.2f}")
+                    with col2:
+                        st.metric("✅ Ya pagado", f"${df['Pagado'].sum():,.2f}")
+                    with col3:
+                        st.metric("⏳ Por pagar", f"${df['Restante'].sum():,.2f}")
+            
+            # opcion = st.selectbox("Seleccione una opción",opciones_tarjetas)
+
+            # # Determinar qué tarjeta_id filtrar (o None si es "Todas")
+            # tarjeta_id_filtro = nombre_a_id.get(opcion) if opcion != "Todas" else None
+
+            # # Consultar compras activas
+            # query = supabase.table("compras") \
+            #     .select("*") \
+            #     .eq("usuario_id", usuario_id) \
+            #     .eq("activa", True)
+            
+            # if tarjeta_id_filtro:
+            #     query = query.eq("tarjeta_id", tarjeta_id_filtro)
+
+            # compras = query.order("fecha_compra", desc=True).execute().data
+
+            # if not compras:
+            #     st.info(f"No hay compras activas{' para ' + opcion if opcion != 'Todas' else ''}.")
+            # else:
+            #     # Construir filas para el DataFrame
+            #     filas = []
+            #     for c in compras:
+            #         nombre_tarjeta = tarjetas_dict.get(c["tarjeta_id"], "Desconocida")
+            #         filas.append({
+            #             "Tarjeta": nombre_tarjeta,
+            #             "Descripción": c["descripcion"],
+            #             "Fecha": c["fecha_compra"],
+            #             "Monto total": c["monto_total"],
+            #             "MSI": c["meses_sin_intereses"],
+            #             "Pago mensual": round(c["monto_total"] / c["meses_sin_intereses"], 2),
+            #         })
+                
+            #     df = pd.DataFrame(filas)
+            #     st.dataframe(
+            #         df,
+            #         use_container_width=True,
+            #         hide_index=True,
+            #         column_config={
+            #             "Monto total": st.column_config.NumberColumn(format="$%.2f"),
+            #             "Pago mensual": st.column_config.NumberColumn(format="$%.2f"),
+            #         }
+            #     )
+            #     st.metric("Total en compras activas", f"${df['Monto total'].sum():,.2f}")
+
+            # # with st.form("form_compras"):
             
         with tabs[1]:
             #muestras tpdas las compras que ya se terminaron de pagar
