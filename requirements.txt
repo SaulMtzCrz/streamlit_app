@@ -3,3 +3,4 @@ supabase
 bcrypt
 pandas
 python-dateutil
+plotly
