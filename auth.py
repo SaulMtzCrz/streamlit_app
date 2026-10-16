@@ -20,10 +20,16 @@ class AuthManager:
             st.session_state["registering"] = False
         if "cards" not in st.session_state:
             st.session_state["cards"] = True
-        # if "opcion_seleccionada" not in st.session_state:
-        #     st.session_state["opcion_seleccionada"] = "🏠 Inicio"
-        # if "sub_opcion_configuracion" not in st.session_state:
-        #     st.session_state["sub_opcion_configuracion"] = "Preferencias"
+        if "db_cards" not in st.session_state:
+            st.session_state["db_cards"] = None
+        if "db_buys" not in st.session_state:
+            st.session_state["db_buys"] = None
+        if "db_payments" not in st.session_state:
+            st.session_state["db_payments"] = None
+        if "deuda_pendiente" not in st.session_state:
+            st.session_state["deuda_pendiente"] = 0
+        if "pagos_proximos" not in st.session_state:
+            st.session_state["pagos_proximos"] = False
 
     @classmethod
     def login(cls, username, password) -> bool:
@@ -39,10 +45,10 @@ class AuthManager:
         st.session_state["username"] = None
         st.rerun()
 
-    @classmethod
-    def register(cls, username, password) -> bool:
-        """Registra un nuevo usuario en la base de datos simulada."""
-        if username in cls.USERS_DB:
-            return False  # Usuario ya existe
-        cls.USERS_DB[username] = password
-        return True
+    # @classmethod
+    # def register(cls, username, password) -> bool:
+    #     """Registra un nuevo usuario en la base de datos simulada."""
+    #     if username in cls.USERS_DB:
+    #         return False  # Usuario ya existe
+    #     cls.USERS_DB[username] = password
+    #     return True

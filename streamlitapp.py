@@ -12,6 +12,61 @@ supabase = get_supabase()
 class MainDashboardPage:
     """Página principal con navegación lateral y vistas personalizadas."""
 
+    def update_payments(self):
+        #consular tabla compras en base de datos
+        try:
+            compras_activas = supabase.table("compras") \
+                .select("*") \
+                .eq("usuario_id", st.session_state["usuario_id"]) \
+                .eq("activa", True) \
+                .execute().data
+            
+            #obtener los id de compra
+            ids_compras = [c["id"] for c in compras_activas]
+
+            #consultar tabla de pagos programados
+            pagos_pendientes = supabase.table("pagos_programados") \
+                .select("compra_id,monto,pagado") \
+                .in_("compra_id",ids_compras) \
+                .execute().data
+            
+            total_pendiente = sum(p["monto"] for p in pagos_pendientes if not p["pagado"])
+            return total_pendiente
+        except Exception as e:
+            st.error(f"Ocurrió un error al consultar compras {e}")
+            return 0
+        
+    def get_database_info(self):
+        try:
+            #consulta tarjetas de credito
+            st.session_state["db_cards"] = supabase.table("tarjetas") \
+                .select("id,nombre") \
+                .eq("usuario_id",st.session_state["usuario_id"]) \
+                .execute()
+            return None
+        except Exception as e:
+            return f"Error en base de datos {e}"
+        
+    def logout(self):
+        st.info("Cerrando Session")
+        AuthManager.logout()
+
+    def marcar_pago_como_pagado(pago_id,usuario_id):
+        """Marca un pago programado como pagado con la fecha de hoy."""
+        try:
+            supabase.table("pagos_programados") \
+                .update({
+                    "pagado": True,
+                    "fecha_pago": date.today().isoformat(),
+                }) \
+                .eq("id", pago_id) \
+                .eq("usuario_id", usuario_id) \
+                .execute()
+            return true
+        except Exception as e:
+            st.error(f"Error al marcar el pago: {e}")
+            return False
+
     def verificar_riesgo_de_corte(self,fecha_compra, dia_corte):
         """
         Devuelve un mensaje de advertencia si la compra podría caer en un periodo
@@ -123,6 +178,9 @@ class MainDashboardPage:
              "limite_credito": limite_credito,
         }).execute()
 
+        #actualizar tarjetas
+        self.get_database_info()
+
         return respuesta.data
 
     def guardar_compra_db(self,descripcion,monto,meses,tarjeta_id,fecha_compra,usuario_id):
@@ -172,7 +230,7 @@ class MainDashboardPage:
         
         # 1. Calcular la fecha de corte de la primera factura
         primera_corte = self.calcular_fecha_corte(fecha_compra, tarjeta["dia_corte"])
-        
+
         # 2. Calcular montos (con ajuste del último pago)
         monto_por_mes = round(monto_total / meses_totales, 2)
         monto_ultimo = monto_total - (monto_por_mes * (meses_totales - 1))
@@ -209,8 +267,6 @@ class MainDashboardPage:
         supabase.table("pagos_programados").insert(pagos).execute()
 
     def render(self):
-        print("Renderizando MainDashboardPage...")
-
         # Almacena la opción seleccionada en el estado de sesión si aún no existe   
         if "opcion_seleccionada" not in st.session_state:
             st.session_state["opcion_seleccionada"] = "🏠 Inicio"
@@ -240,12 +296,7 @@ class MainDashboardPage:
         )
 
         st.sidebar.divider()
-
-        # 2. Encabezado común y botón de Cerrar Sesión
-        col_title, col_logout = st.columns([4, 1])
-        with col_logout:
-            if st.button("🚪 Cerrar Sesión", use_container_width=True):
-                AuthManager.logout()
+        st.sidebar.button("Cerrar Sesión",use_container_width=True,on_click=self.logout)
 
         # 3. Renderizado condicional según la opción del menú
         if seccion == "🏠 Inicio":
@@ -265,13 +316,17 @@ class MainDashboardPage:
         # cuando el usuario llega al dashboard despues del login
         usuario_id = st.session_state["usuario_id"]
 
-        #consulta cuantas tarjetas tiene
-        tarjetas = supabase.table("tarjetas") \
-        .select("id") \
-        .eq("usuario_id", usuario_id) \
-        .execute()
+        #consultar una vez tarjetas y actualizar cuando se necesite
+        if st.session_state["db_cards"] != None:
+            database_info = self.get_database_info()
 
-        if not tarjetas.data:
+        #si hay un error al intenter leer la base de datos
+        if database_info:
+            st.error(database_info)
+            return
+
+        #si es usuario nuevo y no hay registro de tarjetas
+        if not st.session_state["db_cards"].data:
             st.title(f"Bienvenido, {st.session_state['usuario_nombre']}!  👋")
             st.info(
                 "Para empezar, necesitas registrar al menos una tarjeta de crédito. "
@@ -282,32 +337,47 @@ class MainDashboardPage:
 
         else:
             st.session_state["cards"] = True
-            usuario = st.session_state.get("username", "admin")
+            usuario = st.session_state["usuario_nombre"]
             st.title(f"¡Hola! {usuario}")
             st.divider()
 
+            if st.session_state["deuda_pendiente"] == 0:
+                #actualizamos la cantidad de deuda pendiente
+                st.session_state["deuda_pendiente"] = self.update_payments()
+
             st.subheader("📌 Resumen del día")
             col1, col2, col3 = st.columns(3)
-            col1.metric("Gasto total", "$0", "+0%")
-            col2.metric("Gasto Mensual", "$0", "+0%")
-            col3.metric("Compras pendientes", "0", "+0%")
+            col1.metric("Deuda pendiente total", f"${st.session_state["deuda_pendiente"]:,.2f}", "0%")
+            col2.metric("Retención quincenal", "$0", "0%")
+            col3.metric("Pagos pendientes", "0", "0%")
 
-            st.info("💡 Consejo: Usa el menú lateral para navegar entre las diferentes secciones.")
+            #pagos proximos a vencer, configurados en seccion de configuracion
+            st.session_state["pagos_proximos"] = True
 
+            if st.session_state["pagos_proximos"]:
+                st.warning("⚠️ hay pagos proximos a vencerse, seleccione la opcion correspondiente si ya hizo el pago")
+                st.divider()
+
+                #widgets
+                st.button("Banamex vence en 9 días $3144.65",width="stretch")
+
+            else:
+                st.info("💡 Consejo: Usa el menú lateral para navegar entre las diferentes secciones.")
+            
     def _render_registrar_compra(self):
         st.title("💳 Registrar nueva compra")
         st.divider()
 
         #obtener el usuario_id del session_state
-        usuario_id = st.session_state.get("usuario_id")
+        # usuario_id = st.session_state.get("usuario_id")
 
-        #consultar las tarjetas del usuario
-        tarjetas_response = supabase.table("tarjetas") \
-            .select("id, nombre") \
-            .eq("usuario_id", usuario_id) \
-            .execute()
-        
-        tarjetas = tarjetas_response.data #lista de dicts: [{"id":1,"nombre": "banamex"}, ...]
+        # #consultar las tarjetas del usuario
+        # tarjetas_response = supabase.table("tarjetas") \
+        #     .select("id, nombre") \
+        #     .eq("usuario_id", usuario_id) \
+        #     .execute()
+
+        tarjetas = st.session_state["db_cards"].data #lista de dicts: [{"id":1,"nombre": "banamex"}, ...]
 
         #manejar en el caso en que no haya tarjetas
         if not tarjetas:
@@ -328,7 +398,6 @@ class MainDashboardPage:
                 #tarjeta bajadas de la base de datos
                 tarjeta = st.selectbox("Tarjeta", options=list(mapa_tarjetas.keys()))
                 tarjeta_id = mapa_tarjetas[tarjeta]
-                print(f"tarjeta id {tarjeta_id}")
 
             with col2:
                 meses_sin_intereses = st.number_input("Meses a pagar", min_value=1, step=1,max_value=36)
@@ -340,14 +409,12 @@ class MainDashboardPage:
                 .eq("id",tarjeta_id) \
                 .execute().data[0]
 
-            advertencia = self.verificar_riesgo_de_corte(fecha_compra, tarjeta_data["dia_corte"])
-
             submit = st.form_submit_button("Guardar Compra", use_container_width=True,type="primary")
 
             #para las compras que se ejercen los días viernes y fines de semana
             #st.warning("⚠️ Antes de continuar, asegurate que la compra se haya acreditado en la banca ya que tu perdiodo de corte termina es fin de semana")
             errores = []
-
+        
             if submit:
                 if not producto.strip():
                     errores.append("hay campos vacios")
@@ -359,6 +426,9 @@ class MainDashboardPage:
                     errores.append("seleccione una tarjeta")
                 else:
                     try:
+                        advertencia = self.verificar_riesgo_de_corte(fecha_compra, tarjeta_data["dia_corte"])
+                        print(advertencia)
+
                         print(f"producto: {producto}")
                         print(f"monto: {monto_total}")
                         print(f"fecha: {fecha_compra}")
@@ -377,7 +447,7 @@ class MainDashboardPage:
                         #obtener el id de la compra recien creada
                         compra_id = compra_response.data[0]["id"]  # ✅
 
-                        #generar los pagos programados
+                        # #generar los pagos programados
                         self.generar_pagos_programados(
                             compra_id = compra_id,
                             usuario_id = st.session_state["usuario_id"],
@@ -420,7 +490,6 @@ class MainDashboardPage:
 
     def _render_configuracion(self):
         st.title("⚙️ Configuración")
-        st.divider()
 
         if not st.session_state["cards"]:
             st.subheader("Agregar tarjeta de pago")
@@ -494,9 +563,10 @@ class MainDashboardPage:
                 "Preferencias", 
                 "Notificaciones",
                 "Agregar tarjetas",
-                "Eliminar tarjetas"
+                "Editar/Eliminar tarjetas"
                 ])
 
+            #Preferencias
             with tabs[0]:
                 st.subheader("Preferencias de la aplicación")
                 notificaciones = st.checkbox("Activar notificaciones por correo", value=True)
@@ -505,10 +575,10 @@ class MainDashboardPage:
 
                 if st.button("Guardar preferencias"):
                     st.success("Preferencias guardadas con éxito")
-            
+            #Notificaciones
             with tabs[1]:
                 st.subheader("Notificaciones")
-
+            #Agregar tarjetas
             with tabs[2]:
                 st.subheader("Agregar tarjeta de pago")
 
@@ -583,34 +653,126 @@ class MainDashboardPage:
 
                 # st.info("Aquí puedes gestionar tus tarjetas de pago.")
                 # Aquí podrías agregar un formulario para agregar o eliminar tarjetas
-
+            #Editar/Eliminar tarjetas
             with tabs[3]:
-                st.subheader("Eliminar tarjeta de pago")
+                st.subheader("Editar/Eliminar tarjeta de pago")
                 # Aquí podrías agregar un formulario para eliminar tarjetas
-                with st.form("form_eliminar_tarjeta"):
-                    tarjeta_a_eliminar = st.selectbox("Selecciona la tarjeta a eliminar", ["Banamex", "Mercado pago", "Nu", "BBVA"])
-                    if st.form_submit_button("Eliminar tarjeta",type="primary"):
-                        st.warning(f"⚠️ Tarjeta '{tarjeta_a_eliminar}' eliminada con éxito.")
-            # st.subheader("Preferencias de la aplicación")
-            # notificaciones = st.toggle("Activar notificaciones por correo", value=True)
-            # modo_oscuro = st.toggle("Modo oscuro activado", value=True, disabled=True)
-            # moneda = st.selectbox("Moneda principal", ["USD ($)", "MXN ($)", "EUR (€)"])
+                usuario_id = st.session_state["usuario_id"]
 
-            # if st.button("Guardar preferencias"):
-            #     st.toast("Preferencias guardadas con éxito", icon="✅")
+                #consulta las tarjetas del usuario
+                tarjetas =  supabase.table("tarjetas") \
+                    .select("id,nombre,dia_corte,dias_gracia,limite_credito") \
+                    .eq("usuario_id",usuario_id) \
+                    .order("nombre") \
+                    .execute().data
+                
+                if not tarjetas:
+                    st.info("No tienes tarjetas registrados todavia, Agrega una primero. ")
+                    return
+
+                options = ["Editar tarjeta","Eliminar Tarjeta"]
+                selection = st.segmented_control("Directions",options,selection_mode="single",default=["Editar tarjeta"])
+
+                tarjetas_dic = {t["nombre"]: t for t in tarjetas}
+
+                if selection == options[0]:
+                    tarjeta_objetivo = st.selectbox("Selecciona una tarjeta",options=list(tarjetas_dic.keys()))
+                    st.warning("⚠️ Cambiar el ciclo de facturación rompe los pagos ya validados")
+
+                    with st.form("form_editar_tarjeta"):
+                        _columns = st.columns(3)
+                        data_card = tarjetas_dic[tarjeta_objetivo]
+
+                        with _columns[0]:
+                            nuevo_fecha_corte = st.text_input("Fecha de corte",width="stretch",value=data_card["dia_corte"])
+                        with _columns[1]:    
+                            nuevo_plazo_pago = st.text_input("Plazo de pago",width="stretch",value=data_card["dias_gracia"])
+                        with _columns[2]:
+                            nuevo_limite_credito = st.text_input("Limite de crédito",width="stretch",value=data_card["limite_credito"])
+                        
+                        submit = st.form_submit_button("Guardar cambios",type="primary",width="stretch")
+                    
+                    if submit:
+                        #validaciones
+                        errores = []
+                        if not nuevo_fecha_corte.strip():
+                            erroes.append("la fecha de corte no puede quedar vacio")
+                        if not nuevo_plazo_pago.strip():
+                            errores.append("el campo plazo de pago no puede quedar vacio")
+                        if not nuevo_limite_credito.strip():
+                            errores.append("el campo limite de credito no puede quedar vacio")
+                        
+                        try: 
+                            val_corte = int(nuevo_fecha_corte)
+                            if not 1 <= val_corte <= 31:
+                                errores.append("El día de corte debe estar entre 1 y 31.")
+                        except ValueError:
+                            errores.append("El día de corte debe ser un número entero.")
+                        
+                        try:
+                            val_gracia = int(nuevo_plazo_pago)
+                            if val_gracia < 0:
+                                erroes.append("Los días de gracia deben ser positivos.")
+                        except ValueError:
+                            errores.append("Los días de gracia deben ser un número entero.")
+                        
+                        try:
+                            val_limite = float(nuevo_limite_credito)
+                            if val_limite <= 0:
+                                errores.append("El límite debe ser un monto positivo.") 
+                        except ValueError:
+                            errores.append("El límite debe ser un número válido.")
+                        
+                        if errores:
+                            for e in errores:
+                                st.error(f"⚠️ {e}")
+                        else:
+                            try:
+                                supabase.table("tarjetas").update({
+                                    "nombre": tarjeta_objetivo.strip(),
+                                    "dia_corte": val_corte,
+                                    "dias_gracia": val_gracia,
+                                    "limite_credito": val_limite,
+                                }).eq("id", data_card["id"]).execute()
+                                st.toast(f"✅ Tarjeta '{tarjeta_objetivo}' actualizada.", icon="✅")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error al actualizar: {e}")
+
+                elif selection == options[1]:
+                    st.error("❌ Si eliminas una tarjeta, eliminarás todas las compras registradas")
+                    with st.form("form_eliminar_tarjeta"):
+                        tarjeta_objetivo = st.selectbox("Selecciona una tarjeta",options=list(tarjetas_dic.keys()))
+                        confirmación = st.checkbox("Confirmo eliminar tarjeta")
+                        submit = st.form_submit_button("Eliminar",type="primary",width="stretch")
+
+                    if submit:
+                        if not confirmar:
+                            st.error("Primero debes marcar la casilla de confirmación")
+                        else:
+                            try:
+                                supabase.table("tarjetas").delete().eq("id", data_card["id"]).execute()
+                                st.toast(f"🗑️ Tarjeta '{data_card['nombre']}' eliminada.", icon="🗑️")
+                                #actualizar informacion de tarjetas de credito
+                                self.get_database_info()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Ocurrió un error al eliminar: {e}")
 
     def _render_estadisticas(self):
         st.title("📊 Estadísticas generales")
-        st.divider()
+        #st.divider()
 
         usuario_id = st.session_state["usuario_id"]
 
         # ===== 1. Consultar tarjetas del usuario (una sola vez) =====
-        tarjetas = supabase.table("tarjetas") \
-            .select("id, nombre") \
-            .eq("usuario_id", usuario_id) \
-            .order("nombre") \
-            .execute().data
+        # tarjetas = supabase.table("tarjetas") \
+        #     .select("id, nombre") \
+        #     .eq("usuario_id", usuario_id) \
+        #     .order("nombre") \
+        #     .execute().data
+
+        tarjetas = st.session_state["db_cards"].data
         
         # Diccionario para búsqueda rápida
         tarjetas_dict = {t["id"]: t["nombre"] for t in tarjetas}
@@ -624,7 +786,8 @@ class MainDashboardPage:
          # ===== 2. Tabs =====
         tabs = st.tabs([
             "Compras",
-            "Historial"
+            "Historial",
+            "Editar pagos"
         ])
 
         with tabs[0]:
@@ -637,7 +800,7 @@ class MainDashboardPage:
                 opcion = st.selectbox("Filtrar por tarjeta", opciones_tarjetas)
                 tarjeta_id_filtro = nombre_a_id.get(opcion) if opcion != "Todas" else None
 
-                # 1. Consultar las compras activas
+                #1. Consultar las compras activas
                 query = supabase.table("compras") \
                     .select("*") \
                     .eq("usuario_id", usuario_id) \
@@ -727,52 +890,6 @@ class MainDashboardPage:
                     with col3:
                         st.metric("⏳ Por pagar", f"${df['Restante'].sum():,.2f}")
             
-            # opcion = st.selectbox("Seleccione una opción",opciones_tarjetas)
-
-            # # Determinar qué tarjeta_id filtrar (o None si es "Todas")
-            # tarjeta_id_filtro = nombre_a_id.get(opcion) if opcion != "Todas" else None
-
-            # # Consultar compras activas
-            # query = supabase.table("compras") \
-            #     .select("*") \
-            #     .eq("usuario_id", usuario_id) \
-            #     .eq("activa", True)
-            
-            # if tarjeta_id_filtro:
-            #     query = query.eq("tarjeta_id", tarjeta_id_filtro)
-
-            # compras = query.order("fecha_compra", desc=True).execute().data
-
-            # if not compras:
-            #     st.info(f"No hay compras activas{' para ' + opcion if opcion != 'Todas' else ''}.")
-            # else:
-            #     # Construir filas para el DataFrame
-            #     filas = []
-            #     for c in compras:
-            #         nombre_tarjeta = tarjetas_dict.get(c["tarjeta_id"], "Desconocida")
-            #         filas.append({
-            #             "Tarjeta": nombre_tarjeta,
-            #             "Descripción": c["descripcion"],
-            #             "Fecha": c["fecha_compra"],
-            #             "Monto total": c["monto_total"],
-            #             "MSI": c["meses_sin_intereses"],
-            #             "Pago mensual": round(c["monto_total"] / c["meses_sin_intereses"], 2),
-            #         })
-                
-            #     df = pd.DataFrame(filas)
-            #     st.dataframe(
-            #         df,
-            #         use_container_width=True,
-            #         hide_index=True,
-            #         column_config={
-            #             "Monto total": st.column_config.NumberColumn(format="$%.2f"),
-            #             "Pago mensual": st.column_config.NumberColumn(format="$%.2f"),
-            #         }
-            #     )
-            #     st.metric("Total en compras activas", f"${df['Monto total'].sum():,.2f}")
-
-            # # with st.form("form_compras"):
-            
         with tabs[1]:
             #muestras tpdas las compras que ya se terminaron de pagar
             st.subheader("Compras pagadas")
@@ -829,21 +946,118 @@ class MainDashboardPage:
 
                     st.metric("Total pagado en compras terminadas", f"${df['Monto total'].sum():,.2f}")
 
-        # # Datos de prueba
-        
-        # df = pd.DataFrame({
-        #     "Mes": ["Ene", "Feb", "Mar", "Abr", "May", "Jun"],
-        #     "Ventas": [12000, 15000, 11000, 18000, 22000, 25000],
-        #     "Gastos": [8000, 9500, 7000, 10000, 12000, 13000]
-        # })
+        with tabs[2]:
+            st.subheader("Pagos pendientes")
 
-        # col1, col2 = st.columns(2)
-        # with col1:
-        #     st.subheader("Tendencia de Ventas vs Gastos")
-        #     fig = px.line(df, x="Mes", y=["Ventas", "Gastos"], markers=True)
-        #     st.plotly_chart(fig, use_container_width=True)
+            #consultar pagos pendientes
+            pagos = supabase.table("pagos_programados") \
+                .select("*") \
+                .eq("usuario_id", usuario_id) \
+                .eq("pagado", False) \
+                .order("fecha_limite_pago") \
+                .execute().data
+            
+            if not pagos:
+                st.success("🎉 ¡No tienes pagos pendientes!")
+                return
+            
+            #consultar compras y tarjetas
+            compras = supabase.table("compras") \
+                .select("id, descripcion, meses_sin_intereses, tarjeta_id") \
+                .eq("usuario_id", usuario_id) \
+                .execute().data
 
-        # with col2:
-        #     st.subheader("Distribución de Gastos")
-        #     fig_pie = px.pie(values=[40, 25, 20, 15], names=["Nómina", "Marketing", "Servicios", "Otros"])
-        #     st.plotly_chart(fig_pie, use_container_width=True)
+            id_dic_compras = {c["id"]: c for c in compras}
+            list_urgente = []
+            list_proximo = []
+            _hoy = date.today()
+
+            col1, col2, col3 = st.columns([2, 1, 1])
+
+            # with col1:
+            #     st.selectbox("compra activa",value=[])
+
+            # for pago in pagos:
+            #     fecha_limite = date.fromisoformat(pago["fecha_limite_pago"])
+            #     dias_restantes = (fecha_limite - hoy).days
+            
+            # compras_dict = {c["id"]: c for c in compras}
+
+            # #separar el "proximo pago" el más urgente
+            # hoy = date.today()
+            # proximo_pago = pagos[0]
+            # compra_proximo = compras_dict.get(proximo_pago["compra_id"])
+
+            # if compra_proximo:
+            #     tarjeta_nombre = tarjetas_dict.get(compra_proximo["tarjeta_id"], "Desconocida")
+            #     fecha_limite = date.fromisoformat(proximo_pago["fecha_limite_pago"])
+            #     dias_restantes = (fecha_limite - hoy).days
+
+            #     # Destacar el próximo pago
+            #     st.markdown("### 🎯 Próximo pago")
+            #     col1, col2, col3 = st.columns([2, 1, 1])
+
+                # with col1:
+
+            #         st.markdown(f"**{compra_proximo['descripcion']}**")
+            #         st.caption(
+            #             f"Tarjeta: {tarjeta_nombre} · "
+            #             f"Mes {proximo_pago['numero_mes']}/{compra_proximo['meses_sin_intereses']} · "
+            #             f"Vence: {fecha_limite.strftime('%d/%m/%Y')}"
+            #         )
+            #     with col2:
+            #         st.metric("Monto", f"${proximo_pago['monto']:,.2f}")
+            #     with col3:
+            #         if dias_restantes < 0:
+            #             st.error(f"Vencido hace {abs(dias_restantes)} días")
+            #         elif dias_restantes == 0:
+            #             st.warning("Vence hoy")
+            #         elif dias_restantes <= 3:
+            #             st.warning(f"Faltan {dias_restantes} días")
+            #         else:
+            #             st.info(f"Faltan {dias_restantes} días") 
+                    
+            #         if st.button(
+            #             "✅ Marcar como pagado",
+            #             key=f"pagar_{proximo_pago['id']}",
+            #             type="primary",
+            #             use_container_width=True,
+            #         ):
+            #             if self.marcar_pago_como_pagado(proximo_pago["id"], usuario_id):
+            #                 st.toast("✅ Pago registrado", icon="✅")
+            #                 st.rerun()
+                
+            #     st.divider()
+            
+            # st.markdown("### 📋 Otros pagos pendientes")
+
+            # filas = []
+            # for p in pagos:
+            #     compra = compras_dict.get(p["compra_id"])
+            #     if not compra:
+            #         continue
+                
+            #     tarjeta_nombre = tarjetas_dict.get(compra["tarjeta_id"], "Desconocida")
+            #     fecha_limite = date.fromisoformat(p["fecha_limite_pago"])
+            #     dias_restantes = (fecha_limite - hoy).days
+                
+            #     filas.append({
+            #         "ID": p["id"],
+            #         "Tarjeta": tarjeta_nombre,
+            #         "Compra": compra["descripcion"],
+            #         "Mes": f"{p['numero_mes']}/{compra['meses_sin_intereses']}",
+            #         "Vence": fecha_limite.strftime("%d/%m/%Y"),
+            #         "Días": dias_restantes,
+            #         "Monto": p["monto"],
+            #     })
+
+            # df = pd.DataFrame(filas)
+            # st.dataframe(
+            #     df.drop(columns=["ID"]),
+            #     use_container_width=True,
+            #     hide_index=True,
+            #     column_config={
+            #         "Monto": st.column_config.NumberColumn(format="$%.2f"),
+            #         "Días": st.column_config.NumberColumn(format="%d"),
+            #     }
+            # )
