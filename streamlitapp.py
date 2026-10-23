@@ -6,11 +6,174 @@ from datetime import date,timedelta
 from dateutil.relativedelta import relativedelta
 from supabase_client import get_supabase
 import pandas as pd
+from collections import defaultdict
 
 supabase = get_supabase()
 
 class MainDashboardPage:
     """Página principal con navegación lateral y vistas personalizadas."""
+    def marcar_grupo_como_pagado(self,pago_ids,pago_ids_compra):
+        """Marca todos los pagos de un grupo (misma tarjeta y fecha) como pagados."""
+        try:
+            supabase.table("pagos_programados").update({
+                "pagado": True,
+                "fecha_pago": date.today().isoformat(),
+            }).in_("id", pago_ids).execute()
+
+            supabase.table("compras").update({
+                "activa": False
+            }).in_("id", pago_ids_compra).execute()
+            
+            st.toast(
+                f"✅ {len(pago_ids)} pago(s) registrado(s) correctamente.",
+                icon="✅",
+            )
+            st.session_state["deuda_pendiente"] = 0
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error al marcar los pagos: {e}")
+
+    def mostrar_alertas_pagos(self,usuario_id):
+        grupos = self.obtener_pagos_por_tarjeta(usuario_id)
+        #print(grupos)
+        if not grupos:
+            return
+        
+        for g in grupos:
+            # Colores según urgencia
+            if g["dias_restantes"] < 0:
+                icono = "🔴"
+                texto_dias = f"Vencido hace {abs(g['dias_restantes'])} días"
+            elif g["dias_restantes"] == 0:
+                icono = "🔴"
+                texto_dias = "¡Vence hoy!"
+            elif g["dias_restantes"] <= 3:
+                icono = "🟠"
+                texto_dias = f"Vence en {g['dias_restantes']} días"
+            else:
+                icono = "🟡"
+                texto_dias = f"Vence en {g['dias_restantes']} días"
+            
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                
+                with col1:
+                    st.markdown(
+                        f"{icono} **{g['tarjeta']}**\n\n"
+                        f"💰 **${g['monto_total']:,.2f}** · {texto_dias} "
+                        f"(vence el {g['fecha_limite'].strftime('%d/%m/%Y')})\n\n"
+                        f"📦 {g['num_pagos']} compra{'s' if g['num_pagos'] != 1 else ''} incluida{'s' if g['num_pagos'] != 1 else ''}"
+                    )
+                
+                with col2:
+                    if st.button(
+                        "✅ Pagar tarjeta",
+                        key=f"pagar_{g['tarjeta_id']}_{g['fecha_limite'].isoformat()}",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+
+                        lista_ids = g["compras_ids"]
+                        lista_estados = g["status_comra"]
+                        ids_filtrados = [id_ for id_, estado in zip(lista_ids, lista_estados) if estado == 'Pagado']
+                        
+                        self.marcar_grupo_como_pagado(g["pago_ids"],ids_filtrados)
+
+    def obtener_pagos_por_tarjeta(self,usuario_id):
+        """
+        Devuelve los pagos agrupados por tarjeta y fecha límite.
+        Cada grupo representa un 'pago de tarjeta' que se hace en una sola exhibición.
+        """
+        hoy = date.today()
+        
+        # 1. Consultar tarjetas
+        tarjetas = supabase.table("tarjetas") \
+            .select("id, nombre, dias_anticipacion") \
+            .eq("usuario_id", usuario_id) \
+            .execute().data
+        tarjetas_dict = {t["id"]: t for t in tarjetas}
+        
+        # 2. Consultar compras activas
+        compras = supabase.table("compras") \
+            .select("id, tarjeta_id, meses_sin_intereses") \
+            .eq("usuario_id", usuario_id) \
+            .eq("activa", True) \
+            .execute().data
+        
+        #obtiene los id's de cada compra para validarlo con la tabla pagos_programados
+        compras_dict = {c["id"]: c for c in compras}
+        ids_compras = list(compras_dict.keys())
+        
+        if not ids_compras:
+            return []
+        
+        # 3. Consultar pagos pendientes
+        pagos = supabase.table("pagos_programados") \
+            .select("id, compra_id, numero_mes, monto, fecha_limite_pago") \
+            .in_("compra_id", ids_compras) \
+            .eq("pagado", False) \
+            .execute().data
+        
+        # 4. Agrupar por (tarjeta_id, fecha_limite_pago)
+        grupos = defaultdict(lambda: {
+            "pago_ids": [],
+            "monto_total": 0.0,
+            "num_pagos": 0,
+            "compras_ids": [],
+            "estado_compra": []
+        })
+
+        compra_id = 0
+        estado_compra = "Activo"
+        for p in pagos:
+            compra = compras_dict.get(p["compra_id"])
+            if not compra:
+                continue
+
+            if compra_id != p["compra_id"]:
+                compra_id = p["compra_id"]
+                restante = compra["meses_sin_intereses"] - p["numero_mes"]
+                estado_compra = "Activo"
+                if restante == 0:
+                    estado_compra = "Pagado"
+
+            tarjeta_id = compra["tarjeta_id"]
+            fecha_limite = p["fecha_limite_pago"]
+            clave = (tarjeta_id, fecha_limite)
+
+            grupos[clave]["compras_ids"].append(p["compra_id"])
+            grupos[clave]["pago_ids"].append(p["id"])
+            grupos[clave]["monto_total"] += p["monto"]
+            grupos[clave]["num_pagos"] += 1
+            grupos[clave]["estado_compra"].append(estado_compra)
+        
+        # 5. Convertir a lista y filtrar por días de anticipación
+        resultado = []
+        for (tarjeta_id, fecha_limite_str), datos in grupos.items():
+            tarjeta = tarjetas_dict.get(tarjeta_id)
+            if not tarjeta:
+                continue
+            
+            fecha_limite = date.fromisoformat(fecha_limite_str)
+            dias_restantes = (fecha_limite - hoy).days
+            dias_anticipacion = tarjeta.get("dias_anticipacion") or 10
+            
+            if dias_restantes <= dias_anticipacion:
+                resultado.append({
+                    "tarjeta_id": tarjeta_id,
+                    "tarjeta": tarjeta["nombre"],
+                    "fecha_limite": fecha_limite,
+                    "dias_restantes": dias_restantes,
+                    "monto_total": datos["monto_total"],
+                    "num_pagos": datos["num_pagos"],
+                    "pago_ids": datos["pago_ids"],
+                    "compras_ids": datos["compras_ids"],
+                    "status_comra": datos["estado_compra"],
+                })
+        
+        # Ordenar por fecha límite ascendente
+        resultado.sort(key=lambda x: x["fecha_limite"])
+        return resultado
 
     def update_payments(self):
         #consular tabla compras en base de datos
@@ -38,17 +201,73 @@ class MainDashboardPage:
         
     def get_database_info(self):
         try:
+            hoy = date.today()
             #consulta tarjetas de credito
             st.session_state["db_cards"] = supabase.table("tarjetas") \
-                .select("id,nombre") \
+                .select("id, nombre, dias_anticipacion") \
                 .eq("usuario_id",st.session_state["usuario_id"]) \
                 .execute()
+            tarjetas_dict = {t["id"]: t for t in st.session_state["db_cards"]}
+
+            #Consultar compras activas
+            compras = supabase.table("compras") \
+                .select("id, tarjeta_id, meses_sin_intereses") \
+                .eq("usuario_id", st.session_state["usuario_id"]) \
+                .eq("activa", True) \
+                .execute().data
+
+            #obtiene los id's de cada compra para validarlo con la tabla pagos_programados
+            compras_dict = {c["id"]: c for c in compras}
+            ids_compras = list(compras_dict.keys())
+            if not ids_compras:
+                return []
+
+            #Consultar pagos pendientes
+            pagos = supabase.table("pagos_programados") \
+                .select("id, compra_id, numero_mes, monto, fecha_limite_pago") \
+                .in_("compra_id", ids_compras) \
+                .eq("pagado", False) \
+                .execute().data
+
+            #Agrupar por (tarjeta_id, fecha_limite_pago)
+            grupos = defaultdict(lambda: {
+                "pago_ids": [],
+                "monto_total": 0.0,
+                "num_pagos": 0
+            })
+
+            for p in pagos:
+                compra = compras_dict.get(p["compra_id"])
+                if not compra:
+                    continue
+
+                tarjeta_id = compra["tarjeta_id"]
+                fecha_limite = p["fecha_limite_pago"]
+                clave = (tarjeta_id, fecha_limite)
+
+                grupos[clave]["pago_ids"].append(p["id"])
+
+            #Convertir a lista y filtrar por días de anticipación
+            for (tarjeta_id, fecha_limite_str) , datos in grupos.items():
+                tarjeta = tarjetas_dict.get(tarjeta_id)
+                if not tarjeta:
+                    continue
+
+                fecha_limite = date.fromisoformat(fecha_limite_str)
+                dias_restantes = (fecha_limite - hoy).days
+                dias_anticipacion = tarjeta.get("dias_anticipacion") or 10
+
+                if dias_restantes <= dias_anticipacion:
+                    st.session_state["pagos_proximos"] = True
+            
             return None
         except Exception as e:
             return f"Error en base de datos {e}"
         
     def logout(self):
         st.info("Cerrando Session")
+        st.session_state["deuda_pendiente"] = 0
+        st.session_state["db_cards"] = None
         AuthManager.logout()
 
     def marcar_pago_como_pagado(pago_id,usuario_id):
@@ -62,6 +281,7 @@ class MainDashboardPage:
                 .eq("id", pago_id) \
                 .eq("usuario_id", usuario_id) \
                 .execute()
+            st.session_state["deuda_pendiente"] = self.update_pagments()
             return true
         except Exception as e:
             st.error(f"Error al marcar el pago: {e}")
@@ -265,6 +485,7 @@ class MainDashboardPage:
         
         # 4. Insertar todos los pagos en un solo INSERT
         supabase.table("pagos_programados").insert(pagos).execute()
+        self.update_payments()
 
     def render(self):
         # Almacena la opción seleccionada en el estado de sesión si aún no existe   
@@ -316,14 +537,9 @@ class MainDashboardPage:
         # cuando el usuario llega al dashboard despues del login
         usuario_id = st.session_state["usuario_id"]
 
-        #consultar una vez tarjetas y actualizar cuando se necesite
-        if st.session_state["db_cards"] != None:
-            database_info = self.get_database_info()
-
-        #si hay un error al intenter leer la base de datos
-        if database_info:
-            st.error(database_info)
-            return
+        # #consultar una vez tarjetas y actualizar cuando se necesite
+        if st.session_state["db_cards"] == None:
+            self.get_database_info()
 
         #si es usuario nuevo y no hay registro de tarjetas
         if not st.session_state["db_cards"].data:
@@ -339,6 +555,12 @@ class MainDashboardPage:
             st.session_state["cards"] = True
             usuario = st.session_state["usuario_nombre"]
             st.title(f"¡Hola! {usuario}")
+
+            """
+            -consideraciones st.session_state["pagos_proximos"] como habilitar
+            """
+            st.warning("revizar consideraciones")
+
             st.divider()
 
             if st.session_state["deuda_pendiente"] == 0:
@@ -351,15 +573,11 @@ class MainDashboardPage:
             col2.metric("Retención quincenal", "$0", "0%")
             col3.metric("Pagos pendientes", "0", "0%")
 
-            #pagos proximos a vencer, configurados en seccion de configuracion
-            st.session_state["pagos_proximos"] = True
-
             if st.session_state["pagos_proximos"]:
                 st.warning("⚠️ hay pagos proximos a vencerse, seleccione la opcion correspondiente si ya hizo el pago")
                 st.divider()
 
-                #widgets
-                st.button("Banamex vence en 9 días $3144.65",width="stretch")
+                self.mostrar_alertas_pagos(usuario_id)
 
             else:
                 st.info("💡 Consejo: Usa el menú lateral para navegar entre las diferentes secciones.")
@@ -793,6 +1011,8 @@ class MainDashboardPage:
         with tabs[0]:
             #muestra las compras que estan activas con opcones para seleccionar que tarjetas se han utilizado
             st.subheader("Compras activas")
+            st.warning("falta optimizar esta parte sobre todo en la seccion de pago mensual \
+            ya que este debe corresponder al periodo actual")
 
             if not tarjetas:
                 st.info("No tienes tarjetas registradas. Agrega una en Configuración.")
@@ -854,6 +1074,7 @@ class MainDashboardPage:
                             fila["Pagado"] = total_pagado
                             fila["Restante"] = total_restante
                             fila["Meses"] = f"{pagos_hechos}/{c['meses_sin_intereses']}"
+                            fila["Mensual"] = c["monto_total"] / c["meses_sin_intereses"]
 
                         filas.append(fila)
                     df = pd.DataFrame(filas)
@@ -870,8 +1091,9 @@ class MainDashboardPage:
                             "Monto total": st.column_config.NumberColumn(format="$%.2f"),
                             "Pagado": st.column_config.NumberColumn(format="$%.2f"),
                             "Restante": st.column_config.NumberColumn(format="$%.2f"),
+                            "Mensual" : st.column_config.NumberColumn(format="$%.2f")
                         }
-                        orden_columnas = ["Descripción", "Fecha", "Monto total", "MSI", "Pagado", "Restante", "Meses"]
+                        orden_columnas = ["Descripción", "Fecha", "Monto total", "MSI", "Pagado", "Restante", "Meses","Mensual"]
                     # Reordenar columnas
                     df = df[orden_columnas]
                     st.dataframe(
@@ -882,14 +1104,25 @@ class MainDashboardPage:
                     )
 
                     # 6. Métricas resumen
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("💳 Total en compras", f"${df['Monto total'].sum():,.2f}")
-                    with col2:
-                        st.metric("✅ Ya pagado", f"${df['Pagado'].sum():,.2f}")
-                    with col3:
-                        st.metric("⏳ Por pagar", f"${df['Restante'].sum():,.2f}")
-            
+                    if opcion == "Todas":
+                        st.metric("Pendiente total",f"${df['Restante'].sum():,.2f}")
+                        # col1, col2, col3 = st.columns(3)
+                        # with col1:
+                        #     st.metric("Pendiente total",f"${df['Restante'].sum():,.2f}")
+                        # with col2:
+                        #     st.metric("Pendiente mensual")
+                        # with col1:
+                        #     st.metric("💳 Total en compras", f"${df['Monto total'].sum():,.2f}")
+                        # with col2:
+                        #     st.metric("✅ Ya pagado", f"${df['Pagado'].sum():,.2f}")
+                        # with col3:
+                        #     st.metric("⏳ Por pagar", f"${df['Restante'].sum():,.2f}")
+                    else:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Pendiente del total", f"${df['Restante'].sum():,.2f}")
+                        with col2:
+                            st.metric("Por pagar", f"${df['Mensual'].sum():,.2f}")
         with tabs[1]:
             #muestras tpdas las compras que ya se terminaron de pagar
             st.subheader("Compras pagadas")
@@ -945,7 +1178,6 @@ class MainDashboardPage:
                     )
 
                     st.metric("Total pagado en compras terminadas", f"${df['Monto total'].sum():,.2f}")
-
         with tabs[2]:
             st.subheader("Pagos pendientes")
 
