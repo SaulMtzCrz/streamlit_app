@@ -4,4 +4,3 @@ bcrypt
 pandas
 python-dateutil
 plotly
-defaultdict
