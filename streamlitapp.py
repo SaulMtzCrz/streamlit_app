@@ -556,11 +556,6 @@ class MainDashboardPage:
             usuario = st.session_state["usuario_nombre"]
             st.title(f"¡Hola! {usuario}")
 
-            """
-            -consideraciones st.session_state["pagos_proximos"] como habilitar
-            """
-            st.warning("revizar consideraciones")
-
             st.divider()
 
             if st.session_state["deuda_pendiente"] == 0:
@@ -699,13 +694,27 @@ class MainDashboardPage:
             st.markdown("**Rol:** Administrador del Sistema")
             st.markdown("**Estado:** Activo 🟢")
 
-        st.subheader("Modificar datos")
-        with st.form("form_perfil"):
-            email = st.text_input("Correo Electrónico", value="admin@empresa.com")
-            password_nueva = st.text_input("Nueva Contraseña", type="password")
-            if st.form_submit_button("Actualizar Perfil"):
-                st.success("Perfil actualizado correctamente.")
+        # st.subheader("Modificar datos")
 
+        tabs = st.tabs([
+            "Mi perfil",
+            "Mis ingresos",
+            "Mis gastos fijos"
+        ])
+        with tabs[0]:
+            with st.form("form_perfil"):
+                email = st.text_input("Correo Electrónico", value=st.session_state["usuario_email"])
+                password_nueva_1 = st.text_input("Nueva Contraseña", type="password")
+                password_nueva_2 = st.text_input("Repetir Contraseña", type="password")
+                if st.form_submit_button("Actualizar Perfil"):
+                    st.success("Perfil actualizado correctamente.")
+        with tabs[1]:
+            with st.form("form_ingresos"):
+                ingreso_mensual = st.text_input("Ingreso neto mensual", placeholder="$16600")
+        with tabs[2]:
+            with st.form("form_gastosfijos"):
+                gasto = st.text_input("Ingreso neto mensual", placeholder="$8500")
+                
     def _render_configuracion(self):
         st.title("⚙️ Configuración")
 

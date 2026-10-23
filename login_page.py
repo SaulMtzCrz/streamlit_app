@@ -33,7 +33,6 @@ class LoginRegisterPage:
                 new_password = st.text_input("🔓 Nueva Contraseña", type="password", key="register_pass",placeholder="password")
                 repeat_password = st.text_input("🔓 Repetir Contraseña", type="password", key="register_pass_repeat",placeholder="password")
 
-
                 colu1,colu2 = st.columns(2)
                 
                 with colu2:
@@ -150,6 +149,8 @@ class LoginPage:
                             st.session_state["usuario_nombre"] = usuario["nombre"]
                             st.session_state["usuario_email"] = usuario["email"]
                             st.session_state["registering"] = False
+
+                            print(usuario["email"])
 
                             st.success(f"¡Bienvenido, {usuario['nombre']}!")
 
