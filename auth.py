@@ -30,6 +30,8 @@ class AuthManager:
             st.session_state["deuda_pendiente"] = 0
         if "pagos_proximos" not in st.session_state:
             st.session_state["pagos_proximos"] = False
+        if "pago_mensual" not in st.session_state:
+            st.session_state["pago_mensual"] = 0
 
     @classmethod
     def login(cls, username, password) -> bool:

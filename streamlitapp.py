@@ -12,6 +12,71 @@ supabase = get_supabase()
 
 class MainDashboardPage:
     """Página principal con navegación lateral y vistas personalizadas."""
+    def mostrar_grafico_proyecion(self):
+        import pandas as pd
+        from datetime import date
+
+        usuario_id = st.session_state["usuario_id"]
+        
+        # 1. Consultar pagos pendientes
+        pagos = supabase.table("pagos_programados") \
+            .select("fecha_limite_pago, monto") \
+            .eq("usuario_id", usuario_id) \
+            .eq("pagado", False) \
+            .execute().data
+        
+        if not pagos:
+            st.info("No hay pagos pendientes para proyectar.")
+            return
+        
+        # 2. Diccionario de meses
+        meses_espanol = {
+            "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr",
+            "05": "May", "06": "Jun", "07": "Jul", "08": "Ago",
+            "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic"
+        }
+        
+        # 3. Agrupar montos y etiquetas
+        datos_agrupados = {}
+
+        for p in pagos:
+            fecha = date.fromisoformat(p["fecha_limite_pago"].strip())
+            
+            # Clave para ordenar: "2026-11"
+            clave_mes = fecha.strftime("%Y-%m") 
+            
+            # Etiqueta bonita: "Nov 2026"
+            mes_num = fecha.strftime("%m")
+            anio = fecha.strftime("%Y")
+            etiqueta = f"{meses_espanol.get(mes_num, mes_num)} {anio}"
+            
+            # Acumular
+            if clave_mes not in datos_agrupados:
+                datos_agrupados[clave_mes] = {"etiqueta": etiqueta, "monto": 0.0}
+                
+            datos_agrupados[clave_mes]["monto"] += p["monto"]
+
+        # 4. Crear el DataFrame ordenado
+        filas = []
+        for clave_mes in sorted(datos_agrupados.keys()): 
+            filas.append({
+                "Mes": datos_agrupados[clave_mes]["etiqueta"],
+                "Monto a pagar": round(datos_agrupados[clave_mes]["monto"], 2)
+            })
+        
+        df = pd.DataFrame(filas)
+        
+        # 5. Forzar el orden cronológico en Streamlit
+        df["Mes"] = pd.Categorical(df["Mes"], categories=df["Mes"], ordered=True)
+        
+        # 6. Graficar
+        st.subheader("📊 Proyección de pagos por mes")
+        st.bar_chart(df.set_index("Mes"), height=350, color="#FF4B4B")
+        
+        # 7. Total
+        total = df["Monto a pagar"].sum()
+        st.caption(f"Deuda total proyectada: **${total:,.2f}**")
+     
     def marcar_grupo_como_pagado(self,pago_ids,pago_ids_compra):
         """Marca todos los pagos de un grupo (misma tarjeta y fecha) como pagados."""
         try:
@@ -194,7 +259,16 @@ class MainDashboardPage:
                 .execute().data
             
             total_pendiente = sum(p["monto"] for p in pagos_pendientes if not p["pagado"])
-            return total_pendiente
+
+            compra_id = 0
+            precio = []
+
+            for p in pagos_pendientes:
+                if compra_id != p['compra_id']:
+                    compra_id = p['compra_id']
+                    precio.append(p['monto'])
+            
+            return total_pendiente,sum(precio)
         except Exception as e:
             st.error(f"Ocurrió un error al consultar compras {e}")
             return 0
@@ -485,7 +559,7 @@ class MainDashboardPage:
         
         # 4. Insertar todos los pagos en un solo INSERT
         supabase.table("pagos_programados").insert(pagos).execute()
-        self.update_payments()
+        st.session_state["deuda_pendiente"] = 0
 
     def render(self):
         # Almacena la opción seleccionada en el estado de sesión si aún no existe   
@@ -560,13 +634,21 @@ class MainDashboardPage:
 
             if st.session_state["deuda_pendiente"] == 0:
                 #actualizamos la cantidad de deuda pendiente
-                st.session_state["deuda_pendiente"] = self.update_payments()
+                st.session_state["deuda_pendiente"],st.session_state["pago_mensual"] = self.update_payments()
 
-            st.subheader("📌 Resumen del día")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Deuda pendiente total", f"${st.session_state["deuda_pendiente"]:,.2f}", "0%")
-            col2.metric("Retención quincenal", "$0", "0%")
-            col3.metric("Pagos pendientes", "0", "0%")
+            tabs = st.tabs([
+                "Resumen del día",
+                "Proyección de pagos"
+            ])
+
+            with tabs[0]:
+                st.subheader("📌 Resumen del día")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Deuda pendiente total", f"${st.session_state["deuda_pendiente"]:,.2f}", "0%")
+                col2.metric("Retención mensual", f"${st.session_state["pago_mensual"]:,.2f}", "0%")
+                col3.metric("Pagos pendientes", "0", "0%")
+            with tabs[1]:
+                self.mostrar_grafico_proyecion()
 
             if st.session_state["pagos_proximos"]:
                 st.warning("⚠️ hay pagos proximos a vencerse, seleccione la opcion correspondiente si ya hizo el pago")
@@ -1131,7 +1213,7 @@ class MainDashboardPage:
                         with col1:
                             st.metric("Pendiente del total", f"${df['Restante'].sum():,.2f}")
                         with col2:
-                            st.metric("Por pagar", f"${df['Mensual'].sum():,.2f}")
+                            st.metric("Retención Mensual", f"${df['Mensual'].sum():,.2f}")
         with tabs[1]:
             #muestras tpdas las compras que ya se terminaron de pagar
             st.subheader("Compras pagadas")
